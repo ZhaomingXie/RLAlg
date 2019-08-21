@@ -465,7 +465,7 @@ class RL(object):
             pickle.dump(self.shared_obs_stats, output, pickle.HIGHEST_PROTOCOL)
 
     def save_statistics(self, filename):
-        statistics = [self.noisy_test_mean, self.noisy_test_std]
+        statistics = [self.num_samples, self.test_mean, sefl.test_std, self.noisy_test_mean, self.noisy_test_std]
         with open(filename, 'wb') as output:
             pickle.dump(statistics, output, pickle.HIGHEST_PROTOCOL)
 
@@ -474,7 +474,7 @@ class RL(object):
         self.lr = 1e-4
         self.weight = 10
         num_threads = 50
-        num_samples = 0
+        self.num_samples = 0
         seeds = [
             np.random.randint(0, 4294967296) for _ in range(num_threads)
         ]
@@ -489,9 +489,9 @@ class RL(object):
             #print("started")
         self.model.set_noise(noise)
         while True:
-            #if len(self.noisy_test_mean) % 100 == 1:
-                #self.save_statistics("stats/MirrorJuly17Iter%d_v2.stat"%(len(self.noisy_test_mean)))
-            self.save_model("torch_model/Humanoid_seed1.pt")
+            if len(self.noisy_test_mean) % 100 == 1:
+                self.save_statistics("stats/Humanoid_ppo_seed1_Iter%d.stat"%(len(self.noisy_test_mean)))
+            self.save_model("torch_model/Humanoid_ppo_seed1.pt")
             #print(self.traffic_light.val.value)
             #if len(self.test_mean) % 100 == 1 and self.test_mean[len(self.test_mean)-1] > 300:
             #   self.save_model("torch_model/multiskill/v4_cassie3dMirrorIter%d.pt"%(len(self.test_mean),))
@@ -514,7 +514,7 @@ class RL(object):
                     self.counter.increment()
                 if self.counter.get() == num_threads + 1:
                     break
-            num_samples += len(self.memory.memory)
+            self.num_samples += len(self.memory.memory)
             while not self.best_score_queue.empty():
                 self.best_trajectory.push_half(self.best_score_queue.get())
             #self.normalize()
@@ -524,7 +524,7 @@ class RL(object):
             self.clear_memory()
             self.run_test(num_test=2)
             self.run_test_with_noise(num_test=2)
-            print(num_samples, self.test_mean[-1])
+            print(self.num_samples, self.test_mean[-1])
             if self.model.noise[0] > -2:
                 print(self.model.noise)
                 self.model.noise *= 1.001
