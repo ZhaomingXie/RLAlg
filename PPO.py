@@ -28,29 +28,6 @@ import pickle
 import threading
 import torch.multiprocessing as mp
 import queue
-
-#from cassieRLEnv import *
-#from cassiemujoco import *
-# from cassieRLEnvInvariant import *
-# from cassieRLEnvWithMoreState import *
-# from cassieRLEnvAccelPenalty import *
-# from cassieRLEnvSimpleJump import *
-# from cassieRLEnvMultiSkill import *
-# from cassieRLEnvHorizon import *
-# from cassieRLEnvMultiDirection import *
-# from cassieRLEnvMultiTraj import *
-# from cassieRLEnvMirror import *
-# from cassieRLEnvTerrain import *
-# from cassieRLEnvStablePelvis import *
-# from cassieRLEnvNoRef import *
-# from cassieRLEnvHigherFoot import *
-# from cassieRLEnvCleanMotor import *
-# from cassieRLEnvMirrorBackward import *
-# from cassieRLEnvMirrorWithTransition import cassieRLEnvMirrorWithTransition
-# from cassieRLEnvMirrorIKTraj import cassieRLEnvMirrorIKTraj
-# from cassieRLEnvIKBackward import cassieRLEnvIKBackward
-# from cassieRLEnvMirror2D import cassieRLEnvMirror2D
-# from cassieRLEnvMirrorPhase import *
 from utils import TrafficLight
 from utils import Counter
 
@@ -93,13 +70,6 @@ class ReplayMemory(object):
     def sample(self, batch_size):
         #print(len(self.memory), batch_size)
         samples = zip(*random.sample(self.memory, batch_size))
-
-        # samples = zip(*self.memory[self.sample_index:min(self.sample_index + batch_size, len(self.memory))])
-        # self.sample_index += batch_size
-        # if self.sample_index >= len(self.memory):
-        #     self.sample_index = 0
-        #     self.shuffle()
-        #     #print(self.memory)
         return map(lambda x: np.concatenate(x, 0), samples)
 
     def clean_memory(self):
@@ -392,18 +362,10 @@ class RL(object):
     def update_critic(self, batch_size, num_epoch):
         self.model.train()
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr*10)
-        # _, _, _, _, batch_q_values = self.memory.sample(len(self.memory.memory))
-        max_q_value = 1#max(abs(batch_q_values))[0]
-        #print(max(batch_q_values)[0])
-        #model_old = ActorCriticNetMixtureExpert(self.num_inputs, self.num_outputs, self.hidden_layer)
-        #model_old.load_state_dict(self.model.state_dict())
         for k in range(num_epoch):
             batch_states, batch_actions, batch_next_states, batch_rewards, batch_q_values = self.memory.sample(batch_size)
             batch_states = self.shared_obs_stats.normalize(Variable(torch.Tensor(batch_states)))
             batch_q_values = Variable(torch.Tensor(batch_q_values)) / self.max_reward.value
-            #batch_q_values = self.return_obs_stats.normalize(Variable(torch.Tensor(batch_q_values)))
-            #batch_next_states = Variable(torch.Tensor(batch_next_states))
-            #v_pred_next = model_old.get_value(batch_next_states)
             v_pred = self.model.get_value(batch_states)
             loss_value = (v_pred - batch_q_values)**2
             loss_value = 0.5*torch.mean(loss_value)
@@ -418,12 +380,7 @@ class RL(object):
         model_old.set_noise(self.model.noise)
         self.model.train()
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        # batch_states, _, _, _, batch_q_values = self.memory.sample(len(self.memory.memory))
-        # batch_states = self.shared_obs_stats.normalize(Variable(torch.Tensor(batch_states)))
-        # v_pred_old = model_old.get_value(batch_states)
-        max_advantage = 1#abs((Variable(torch.Tensor(batch_q_values)) - v_pred_old).data.numpy()[0][0])
-        max_q_value = 1#max(abs(batch_q_values))[0]
-        #print(max_advantage)
+
         for k in range(num_epoch):
             batch_states, batch_actions, batch_next_states, batch_rewards, batch_q_values = self.memory.sample(batch_size)
 
