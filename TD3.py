@@ -1,6 +1,7 @@
-from RL_MixExpert import *
+from PPO import *
 from model import *
 import pybullet_envs
+from radam import RAdam
 #from cassieRLEnvMirrorPhase import *
 
 from raisim_gym.env.RaisimGymVecEnv import RaisimGymVecEnv as Environment
@@ -43,6 +44,8 @@ class RL_SAC(RL):
 
 		self.q_function_optimizer = optim.Adam(self.q_function.parameters(), lr=self.lr, weight_decay=0e-3)
 		self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr, weight_decay=0e-3)
+		#self.q_function_optimizer = RAdam(self.q_function.parameters(), lr=self.lr, weight_decay=0e-3)
+		#self.actor_optimizer = RAdam(self.actor.parameters(), lr=self.lr, weight_decay=0e-3)
 		self.actor.train()
 		self.q_function.train()
 
@@ -200,25 +203,6 @@ class RL_SAC(RL):
 			q_values = []
 			dones = []
 
-	def update_critic(self, batch_size, num_epoch):
-		self.model.train()
-		optimizer = optim.Adam(self.critic.parameters(), lr=self.lr*10)
-		critic_old = ValueNet(self.num_inputs, self.hidden_layer)
-		critic_old.load_state_dict(self.critic.state_dict())
-		for k in range(num_epoch):
-			batch_states, batch_actions, batch_next_states, _, _, batch_q_values = self.memory.sample(batch_size)
-			batch_states = Variable(torch.Tensor(batch_states))
-			batch_q_values = Variable(torch.Tensor(batch_q_values))
-			batch_next_states = Variable(torch.Tensor(batch_next_states))
-			v_pred_next = critic_old(batch_next_states)
-			v_pred = self.critic(batch_states)
-			loss_value = (v_pred - batch_q_values)**2
-			loss_value = 0.5*torch.mean(loss_value)
-			optimizer.zero_grad()
-			loss_value.backward(retain_graph=True)
-			optimizer.step()
-			av_value_loss = loss_value.data[0]
-
 	def update_q_function(self, batch_size, num_epoch, update_actor=False):
 		for k in range(num_epoch):
 			batch_states, batch_actions, batch_next_states, batch_rewards, batch_dones = self.off_policy_memory.sample(batch_size)
@@ -301,12 +285,14 @@ class RL_SAC(RL):
 		torch.save(self.actor.state_dict(), filename)
 
 	def collect_samples_multithread(self):
-		#queue = Queue.Queue()
+		import time
+		self.num_samples = 0
+		self.start = time.time()
 		self.num_threads = 10
 		self.action_weight = 0
-		total_samples = 0
 		self.lr = 3e-4
 		self.traffic_light.explore.value = True
+		self.time_passed = 0
 		seeds = [
 			np.random.randint(0, 4294967296) for _ in range(self.num_threads)
 		]
@@ -341,19 +327,20 @@ class RL_SAC(RL):
 					self.traffic_light.explore.value = False
 				else:
 					print("explore")
-				for policy_update in range(len(self.memory.memory)//self.num_threads*2):
+				for policy_update in range(len(self.memory.memory)):
 					if policy_update % 2 == 0:
 						self.update_q_function(128, 1)
 					else:
 						self.update_q_function(128, 1, update_actor=True)
 						self.update_q_target(0.005)
 						self.update_actor_target(0.005)
-				total_samples += memory_len
+				self.num_samples += memory_len
 				if iter % 10 == 0:
 					self.run_test(num_test=2)
 					self.plot_statistics()
-					self.save_actor("Walker2d-v2.pt")
-					print(total_samples, self.test_mean[-1])
+					self.save_actor("torch_model/Walker2d_TD3.pt")
+					print(self.num_samples, self.test_mean[-1])
+					self.save_statistics("stats/Walker2d_td3_adam_seed1_Iter%d.stat"%(len(self.noisy_test_mean)))
 				#self.update_critic(128, 64)
 				
 
@@ -370,6 +357,9 @@ class RL_SAC(RL):
 
 if __name__ == '__main__':
 	torch.set_num_threads(1)
+	random.seed(1)
+	torch.manual_seed(1)
+	np.random.seed(1)
 	#from ruamel.yaml import YAML, dump, RoundTripDumper
 	#from _raisim_gym import RaisimGymEnv
 	#parser = argparse.ArgumentParser()
@@ -379,8 +369,7 @@ if __name__ == '__main__':
 	#cfg = YAML().load(open(cfg_abs_path, 'r'))
 	import gym
 	env = gym.make("Walker2d-v2")#Environment(RaisimGymEnv(__RSCDIR__, dump(cfg['environment'], Dumper=RoundTripDumper)))
-	env.delay = False
-	env.noisy = False
+	env.seed(1)
 	sac = RL_SAC(env, [256, 256])
 	sac.collect_samples_multithread()
 

@@ -30,6 +30,7 @@ import torch.multiprocessing as mp
 import queue
 from utils import TrafficLight
 from utils import Counter
+from radam import RAdam
 
 
 
@@ -361,7 +362,8 @@ class RL(object):
 
     def update_critic(self, batch_size, num_epoch):
         self.model.train()
-        optimizer = optim.Adam(self.model.parameters(), lr=self.lr*10)
+        #optimizer = optim.Adam(self.model.parameters(), lr=self.lr*10)
+        optimizer = RAdam(self.model.parameters(), lr=self.lr*10)
         for k in range(num_epoch):
             batch_states, batch_actions, batch_next_states, batch_rewards, batch_q_values = self.memory.sample(batch_size)
             batch_states = self.shared_obs_stats.normalize(Variable(torch.Tensor(batch_states)))
@@ -379,7 +381,8 @@ class RL(object):
         model_old.load_state_dict(self.model.state_dict())
         model_old.set_noise(self.model.noise)
         self.model.train()
-        optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+        #optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+        optimizer = RAdam(self.model.parameters(), lr=self.lr)
 
         for k in range(num_epoch):
             batch_states, batch_actions, batch_next_states, batch_rewards, batch_q_values = self.memory.sample(batch_size)
@@ -465,16 +468,19 @@ class RL(object):
             pickle.dump(self.shared_obs_stats, output, pickle.HIGHEST_PROTOCOL)
 
     def save_statistics(self, filename):
-        statistics = [self.num_samples, self.test_mean, sefl.test_std, self.noisy_test_mean, self.noisy_test_std]
+        statistics = [self.time_passed, self.num_samples, self.test_mean, self.test_std, self.noisy_test_mean, self.noisy_test_std]
         with open(filename, 'wb') as output:
             pickle.dump(statistics, output, pickle.HIGHEST_PROTOCOL)
 
     def collect_samples_multithread(self):
         #queue = Queue.Queue()
+        import time
+        self.start = time.time()
         self.lr = 1e-4
         self.weight = 10
-        num_threads = 50
+        num_threads = 100
         self.num_samples = 0
+        self.time_passed = 0
         seeds = [
             np.random.randint(0, 4294967296) for _ in range(num_threads)
         ]
@@ -529,6 +535,8 @@ class RL(object):
                 print(self.model.noise)
                 self.model.noise *= 1.001
             self.plot_statistics()
+
+            self.time_passed = time.time() - self.start
             self.traffic_light.switch()
             self.counter.reset()
 
@@ -548,8 +556,9 @@ if __name__ == '__main__':
     torch.set_num_threads(1)
     import gym
     env = gym.make("Humanoid-v2")
+    env.seed(1)
     ppo = RL(env, [256, 256])
 
     ppo.collect_samples_multithread()
 
-    start = t.time()
+    #ppo.start = t.time()
