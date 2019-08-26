@@ -8,7 +8,6 @@ from torch.distributions import Normal, Categorical
 import math
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 class ActorCriticNet(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64]):
         super(ActorCriticNet, self).__init__()
@@ -180,8 +179,21 @@ class ActorCriticNetMixtureExpert(nn.Module):
         #probs = log_probs.sum(dim=0)
         return probs
 
+    def calculate_prob_gpu(self, inputs, actions):
+        log_stds = self.get_log_stds(actions).to(device)
+        #print(log_stds.shape)
+        mean_actions = torch.stack(self.get_mean_actions(inputs))
+        #print(mean_actions.shape)
+        w = self.get_w(inputs)
+        numer = ((actions - mean_actions) / (log_stds.exp())).pow(2)
+        log_probs = (-0.5 * numer).sum(dim=-1) - log_stds.sum(dim=-1)
+        #print(log_probs)
+        probs = (log_probs.exp() * w.t()).sum(dim=0).log()
+        return probs
+
     def get_log_stds(self, actions):
         return Variable(torch.Tensor(self.noise)*torch.ones(self.num_outputs)).unsqueeze(0).expand_as(actions)
+
         #return self.log_std.unsqueeze(0).expand_as(actions)
 
     def get_actions_difference(self, inputs):
@@ -413,25 +425,23 @@ class ActorNet(nn.Module):
         #log_std = F.tanh((self.log_std_linear(inputs)))
         #log_std = torch.clamp(log_std, min=-2, max=2)
         return mu, log_std
-    def sample(self, inputs):
+    def sample_gpu(self, inputs):
         mean, log_std = self.forward(inputs)
-        mean.to(device)
+        #mean.to(device)
         std = log_std.exp().to(device)
         eps = torch.randn(mean.shape).to(device)
-        #print(std.device)
-        #eps.clamp(-0.5, 0.5)
-        #print(eps.data)
-        #action = mean + noise
         normal = Normal(mean, std)
         #action = normal.rsample()
         action = (mean + (std * eps).clamp(-0.5, 0.5)).clamp(-1.0, 1.0)#torch.clamp(normal.rsample(), -1.0, 1.0)
-        #print(std)
-        #print(action - mean)
-        #log_prob = 0
-        # log_prob = normal.log_prob(action)
-        # log_prob -= torch.log(1 - F.tanh(action).pow(2) + 1e-6)
-        # log_prob = log_prob.sum(1, keepdim=True)
-        #print(log_prob)
+        return (action), 0, (mean), 0
+    def sample(self, inputs):
+        mean, log_std = self.forward(inputs)
+        #mean.to(device)
+        std = log_std.exp()
+        eps = torch.randn(mean.shape)
+        normal = Normal(mean, std)
+        #action = normal.rsample()
+        action = (mean + (std * eps).clamp(-0.5, 0.5)).clamp(-1.0, 1.0)#torch.clamp(normal.rsample(), -1.0, 1.0)
         return (action), 0, (mean), 0
     def set_noise(self, noise):
         self.noise = noise

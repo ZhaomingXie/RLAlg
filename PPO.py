@@ -32,7 +32,11 @@ from utils import TrafficLight
 from utils import Counter
 from radam import RAdam
 
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# try:
+#     mp.set_start_method('spawn')
+# except RuntimeError:
+#     pass
 
 class ReplayMemory(object):
     def __init__(self, capacity):
@@ -106,7 +110,6 @@ class RL(object):
         self.model = ActorCriticNetMixtureExpert(self.num_inputs, self.num_outputs,self.hidden_layer)
         self.model.share_memory()
         self.shared_obs_stats = Shared_obs_stats(self.num_inputs)
-        self.best_model = ActorCriticNet(self.num_inputs, self.num_outputs,self.hidden_layer)
         self.memory = ReplayMemory(self.params.num_steps * 10000)
         self.test_mean = []
         self.test_std = []
@@ -149,10 +152,10 @@ class RL(object):
         #model_old.load_state_dict(self.model.state_dict())
         for i in range(num_iter):
             self.shared_obs_stats.observes(state)
-            state = self.shared_obs_stats.normalize(state)
+            state = self.shared_obs_stats.normalize(state).to(device)
             mu = self.model.sample_actions(state)
             action = mu#(mu + log_std.exp()*Variable(eps))
-            env_action = action.data.squeeze().numpy()
+            env_action = action.cpu().data.squeeze().numpy()
             env.action = np.random.randn(self.num_outputs)
             state, reward, done, _ = self.env.step(env_action)
 
@@ -176,7 +179,7 @@ class RL(object):
             while True:
                 state = self.shared_obs_stats.normalize(state)
                 mu = self.model.sample_best_actions(state)
-                action = mu.data.squeeze().numpy()
+                action = mu.cpu().data.squeeze().numpy()
                 state, reward, done, _ = self.env.step(action)
                 total_reward += reward
                 #print(state)
@@ -214,7 +217,7 @@ class RL(object):
                 mu = self.model.sample_actions(state)
                 eps = torch.randn(mu.size())
                 action = (mu + 0.1*Variable(eps))
-                action = action.data.squeeze().numpy()
+                action = action.cpu().data.squeeze().numpy()
                 state, reward, done, _ = self.env.step(action)
                 total_reward += reward
 
@@ -287,12 +290,12 @@ class RL(object):
             while samples < num_samples and not done:
                 #self.shared_obs_stats.observes(state)
 
-                states.append(state.data.numpy())
+                states.append(state.cpu().data.numpy())
                 #self.shared_obs_stats.observes(state)
                 state = self.shared_obs_stats.normalize(state)
                 action = self.model.sample_actions(state)
 
-                actions.append(action.data.numpy())
+                actions.append(action.cpu().data.numpy())
                
                 env_action = action.data.squeeze().numpy()
                 state, reward, done, _ = self.env.step(env_action)
@@ -305,7 +308,7 @@ class RL(object):
                 real_rewards.append(Variable(reward * torch.ones(1)).data.numpy())
                 
                 state = Variable(torch.Tensor(state).unsqueeze(0))
-                next_states.append(state.data.numpy())
+                next_states.append(state.cpu().data.numpy())
                 next_state = self.shared_obs_stats.normalize(state)
                 
                 samples += 1
@@ -322,7 +325,7 @@ class RL(object):
             for i in reversed(range(len(real_rewards))):
                 reward = Variable(torch.from_numpy(real_rewards[i]).unsqueeze(0))
                 R = self.params.gamma * R + reward#self.return_obs_stats.normalize(reward)# Variable(torch.from_numpy(real_rewards[i]))
-                q_values.insert(0, R.data.numpy())
+                q_values.insert(0, R.cpu().data.numpy())
                 self.return_obs_stats.observes(R)
 
 
@@ -366,8 +369,8 @@ class RL(object):
         optimizer = RAdam(self.model.parameters(), lr=self.lr*10)
         for k in range(num_epoch):
             batch_states, batch_actions, batch_next_states, batch_rewards, batch_q_values = self.memory.sample(batch_size)
-            batch_states = self.shared_obs_stats.normalize(Variable(torch.Tensor(batch_states)))
-            batch_q_values = Variable(torch.Tensor(batch_q_values)) / self.max_reward.value
+            batch_states = self.shared_obs_stats.normalize(Variable(torch.Tensor(batch_states))).to(device)
+            batch_q_values = Variable(torch.Tensor(batch_q_values)).to(device) / self.max_reward.value
             v_pred = self.model.get_value(batch_states)
             loss_value = (v_pred - batch_q_values)**2
             loss_value = 0.5*torch.mean(loss_value)
@@ -377,7 +380,7 @@ class RL(object):
             #print(loss_value)
 
     def update_actor(self, batch_size, num_epoch, supervised=False):
-        model_old = ActorCriticNetMixtureExpert(self.num_inputs, self.num_outputs, self.hidden_layer)
+        model_old = ActorCriticNetMixtureExpert(self.num_inputs, self.num_outputs, self.hidden_layer).to(device)
         model_old.load_state_dict(self.model.state_dict())
         model_old.set_noise(self.model.noise)
         self.model.train()
@@ -387,14 +390,14 @@ class RL(object):
         for k in range(num_epoch):
             batch_states, batch_actions, batch_next_states, batch_rewards, batch_q_values = self.memory.sample(batch_size)
 
-            batch_states = self.shared_obs_stats.normalize(Variable(torch.Tensor(batch_states)))
-            batch_q_values = Variable(torch.Tensor(batch_q_values)) / self.max_reward.value
+            batch_states = self.shared_obs_stats.normalize(Variable(torch.Tensor(batch_states))).to(device)
+            batch_q_values = Variable(torch.Tensor(batch_q_values)).to(device) / self.max_reward.value
             #batch_q_values = self.return_obs_stats.normalize(Variable(torch.Tensor(batch_q_values)))
-            batch_actions = Variable(torch.Tensor(batch_actions))
+            batch_actions = Variable(torch.Tensor(batch_actions)).to(device)
             v_pred_old = model_old.get_value(batch_states)
             batch_advantages = (batch_q_values - v_pred_old)
-            probs_old = model_old.calculate_prob(batch_states, batch_actions)
-            probs = self.model.calculate_prob(batch_states, batch_actions)
+            #probs_old = model_old.calculate_prob_gpu(batch_states, batch_actions)
+            #probs = self.model.calculate_prob_gpu(batch_states, batch_actions)
 
             mu_old = model_old.get_mean_actions(batch_states)[0]
             mu = self.model.get_mean_actions(batch_states)[0]
@@ -405,8 +408,8 @@ class RL(object):
             # ratio = (probs.exp()/probs_old.exp())
             # print("ratio1", ratio.mean())
             
-            probs = self.model.calculate_prob(batch_states, batch_actions)
-            probs_old = model_old.calculate_prob(batch_states, batch_actions)
+            probs = self.model.calculate_prob_gpu(batch_states, batch_actions)
+            probs_old = model_old.calculate_prob_gpu(batch_states, batch_actions)
             ratio = (probs - (probs_old)).exp()
             ratio = ratio.unsqueeze(1)
             # print("ratio", ratio.mean())
@@ -421,8 +424,8 @@ class RL(object):
                     batch_expert_states, batch_expert_actions, _, _, _ = self.expert_trajectory.sample(len(self.expert_trajectory.memory))
                 else:
                     batch_expert_states, batch_expert_actions, _, _, _ = self.best_trajectory.sample(min(batch_size, len(self.best_trajectory.memory)))
-                batch_expert_states = Variable(torch.Tensor(batch_expert_states))
-                batch_expert_actions = Variable(torch.Tensor(batch_expert_actions))
+                batch_expert_states = Variable(torch.Tensor(batch_expert_states)).to(device)
+                batch_expert_actions = Variable(torch.Tensor(batch_expert_actions)).to(device)
                 mu_expert = self.model.sample_actions(batch_expert_states)
                 loss_expert1 = torch.mean((batch_expert_actions-mu_expert)**2)
                 loss_expert = loss_expert1#torch.min(loss_expert1, loss_expert2)
@@ -478,7 +481,7 @@ class RL(object):
         self.start = time.time()
         self.lr = 1e-4
         self.weight = 10
-        num_threads = 100
+        num_threads = 10
         self.num_samples = 0
         self.time_passed = 0
         seeds = [
@@ -524,9 +527,10 @@ class RL(object):
             while not self.best_score_queue.empty():
                 self.best_trajectory.push_half(self.best_score_queue.get())
             #self.normalize()
+            self.model.to(device)
             self.update_critic(min(128, len(self.memory.memory)), (len(self.memory.memory)//3000 + 1) * 64 * 2)
-            #self.memory.memory = list.copy(self.best_trajectory.memory) + self.memory.memory
             self.update_actor(min(128, len(self.memory.memory)), (len(self.memory.memory)//3000 + 1) * 64 * 2, supervised=False)
+            self.model.to("cpu")
             self.clear_memory()
             self.run_test(num_test=2)
             self.run_test_with_noise(num_test=2)

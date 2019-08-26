@@ -6,12 +6,10 @@ from radam import RAdam
 
 from raisim_gym.env.RaisimGymVecEnv import RaisimGymVecEnv as Environment
 from raisim_gym.env.env.ANYmal import __ANYMAL_RESOURCE_DIRECTORY__ as __RSCDIR__
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-try:
-	mp.set_start_method('spawn')
-except RuntimeError:
-	pass
+# try:
+# 	mp.set_start_method('spawn')
+# except RuntimeError:
+# 	pass
 
 # from multiprocessing import set_start_method
 # try:
@@ -19,7 +17,7 @@ except RuntimeError:
 # except RuntimeError:
 #     pass
 #from multiprocessing import set_start_method
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class RL_TD3(RL):
 	def __init__(self, env, hidden_layer=[64, 64]):
 		super().__init__(env, hidden_layer=hidden_layer)
@@ -28,17 +26,18 @@ class RL_TD3(RL):
 		self.num_outputs = env.action_space.shape[0]
 		self.hidden_layer = hidden_layer
 		self.params = Params()
-		self.actor = ActorNet(self.num_inputs, self.num_outputs,self.hidden_layer).to(device)
-		self.actor_target = ActorNet(self.num_inputs, self.num_outputs, self.hidden_layer).to(device)
+		self.actor = ActorNet(self.num_inputs, self.num_outputs,self.hidden_layer).to("cpu")
+		self.actor_target = ActorNet(self.num_inputs, self.num_outputs, self.hidden_layer).to("cpu")
 		self.actor_target.load_state_dict(self.actor.state_dict())
-		self.q_function = QNet(self.num_inputs, self.num_outputs,self.hidden_layer).to(device)
-		self.q_function_target = QNet(self.num_inputs, self.num_outputs,self.hidden_layer).to(device)
+		self.q_function = QNet(self.num_inputs, self.num_outputs,self.hidden_layer).to("cpu")
+		self.q_function_target = QNet(self.num_inputs, self.num_outputs,self.hidden_layer).to("cpu")
 		self.q_function_target.load_state_dict(self.q_function.state_dict())
 		#self.actor_target = ActorNet(self.num_inputs, num_outputs, self.hidden_layer)
 		#self.actor_target.load_state_dict(self.actor.state_dict())
 		self.q_function.share_memory()
 		self.actor.share_memory()
 		self.q_function_target.share_memory()
+		self.actor_target.share_memory()
 		self.shared_obs_stats = Shared_obs_stats(self.num_inputs)
 		self.memory = ReplayMemory(self.params.num_steps * 10000)
 		self.test_mean = []
@@ -84,12 +83,12 @@ class RL_TD3(RL):
 			total_reward = 0
 			num_step = 0
 			while True:
-				state = self.shared_obs_stats.normalize(state).to(device)
+				state = self.shared_obs_stats.normalize(state).to("cpu")
 				#print(self.actor.device)
 				action, _, mean, log_std = self.actor.sample(state)
 				#print("log std", log_std)
 				print(mean.data)
-				env_action = mean.data.squeeze().numpy()
+				env_action = mean.cpu().data.squeeze().numpy()
 				state, reward, done, _ = self.env.step(env_action)
 
 				total_reward += reward
@@ -138,6 +137,7 @@ class RL_TD3(RL):
 		random.seed(random_seed)
 		torch.manual_seed(random_seed+1)
 		np.random.seed(random_seed+2)
+		#torch.cuda.manual_seed_all(random_seed+3)
 		start_state = self.env.reset()
 		samples = 0
 		done = False
@@ -157,12 +157,13 @@ class RL_TD3(RL):
 			#actor_old = ActorNet(self.num_inputs, self.num_outputs, self.hidden_layer)
 			#actor_old.load_state_dict(self.actor.state_dict())
 			#print("something")
+			self.actor.load_state_dict(torch.load(self.model_path))
 			signal_init = self.traffic_light.get()
 			while samples < num_samples and not done:
-				state = self.shared_obs_stats.normalize(state).to(device)
+				state = self.shared_obs_stats.normalize(state).to("cpu")
 				states.append(state.cpu().data.numpy())
 				if self.traffic_light.explore.value == False:# and random.randint(0,90)%100 > 0:
-					action, _, mean, _ = self.actor.sample(state).detach()
+					action, _, mean, _ = self.actor.sample(state)
 					action.detach()
 					mean.detach()
 					#print(action)
@@ -176,6 +177,7 @@ class RL_TD3(RL):
 				state, reward, done, _ = self.env.step(env_action)
 				if reward > self.max_reward.value:
 					self.max_reward.value = reward
+				#print(env_action)
 				#print(samples, env_action, reward, state)
 
 				#print(reward)
@@ -191,6 +193,7 @@ class RL_TD3(RL):
 				#done = (done or samples > num_samples)
 
 			self.queue.put([states, actions, next_states, rewards, dones])
+			#print(self.actor.p_fcs[0].bias.data[0])
 			self.counter.increment()
 				#print("waiting sim time passed", t.time() - start)
 			start = t.time()
@@ -235,7 +238,7 @@ class RL_TD3(RL):
 			batch_dones = torch.cat([batch_dones, batch_dones2], 0).to(device)
 
 			#compute on policy actions for next state
-			batch_next_state_action, batch_next_log_prob,  batch_next_state_action_mean, _, = self.actor_target.sample(batch_next_states)
+			batch_next_state_action, batch_next_log_prob,  batch_next_state_action_mean, _, = self.actor_target.sample_gpu(batch_next_states)
 			#compute q value for these actions
 			q_next_1_target, q_next_2_target = self.q_function_target(batch_next_states, batch_next_state_action)
 			q = torch.min(q_next_1_target, q_next_2_target)
@@ -266,22 +269,6 @@ class RL_TD3(RL):
 			self.actor_optimizer.zero_grad()
 			policy_loss.backward()
 			self.actor_optimizer.step()
-			#for param in self.actor.parameters():
-			#	print(param.data)
-
-			#alpha loss
-			# self.alpha = self.log_alpha.exp()
-			# alpha_loss = -(self.alpha * (log_prob - 3).detach()).mean()
-			# self.alpha_optim.zero_grad()
-			# alpha_loss.backward()
-			# self.alpha_optim.step()
-			# self.alpha = self.log_alpha.exp()
-			#self.alpha = 0
-			
-			#print("alpha", self.alpha, "log prob", (log_prob).mean().data.numpy())
-			#print(k, "q value loss", q1_value_loss, q2_value_loss)
-			#print("log_prob", log_std)
-		#self.q_function_target.load_state_dict(q_function_old.state_dict())
 
 	def update_q_target(self, tau):
 		for target_param, param in zip(self.q_function_target.parameters(), self.q_function.parameters()):
@@ -334,6 +321,10 @@ class RL_TD3(RL):
 					self.traffic_light.explore.value = False
 				else:
 					print("explore")
+				self.actor.to(device)
+				self.q_function.to(device)
+				self.actor_target.to(device)
+				self.q_function_target.to(device)
 				for policy_update in range(len(self.memory.memory)):
 					if policy_update % 2 == 0:
 						self.update_q_function(128, 1)
@@ -341,11 +332,17 @@ class RL_TD3(RL):
 						self.update_q_function(128, 1, update_actor=True)
 						self.update_q_target(0.005)
 						self.update_actor_target(0.005)
+				self.actor.to("cpu")
+				self.q_function.to("cpu")
+				self.actor_target.to("cpu")
+				self.q_function_target.to("cpu")
+
+				#print(self.actor.p_fcs[0].bias.data[0])
 				self.num_samples += memory_len
+				self.save_actor(self.model_path)
 				if iter % 10 == 0:
 					self.run_test(num_test=2)
 					self.plot_statistics()
-					self.save_actor("torch_model/Humanoid_TD3.pt")
 					print(self.num_samples, self.test_mean[-1])
 					self.save_statistics("stats/Humanoid_td3_radam_seed1_Iter%d.stat"%(len(self.noisy_test_mean)))
 				#self.update_critic(128, 64)
@@ -367,6 +364,7 @@ if __name__ == '__main__':
 	random.seed(1)
 	torch.manual_seed(1)
 	np.random.seed(1)
+	torch.cuda.manual_seed_all(1)
 	#from ruamel.yaml import YAML, dump, RoundTripDumper
 	#from _raisim_gym import RaisimGymEnv
 	#parser = argparse.ArgumentParser()
@@ -378,6 +376,8 @@ if __name__ == '__main__':
 	env = gym.make("Humanoid-v2")#Environment(RaisimGymEnv(__RSCDIR__, dump(cfg['environment'], Dumper=RoundTripDumper)))
 	env.seed(1)
 	sac = RL_TD3(env, [256, 256])
+	sac.model_path = "torch_model/Humanoid_TD3.pt"
+	sac.save_actor(sac.model_path)
 
 	sac.collect_samples_multithread()
 
