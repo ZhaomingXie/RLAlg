@@ -7,7 +7,20 @@ from radam import RAdam
 from raisim_gym.env.RaisimGymVecEnv import RaisimGymVecEnv as Environment
 from raisim_gym.env.env.ANYmal import __ANYMAL_RESOURCE_DIRECTORY__ as __RSCDIR__
 
-class RL_SAC(RL):
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+try:
+	mp.set_start_method('spawn')
+except RuntimeError:
+	pass
+
+# from multiprocessing import set_start_method
+# try:
+#     set_start_method('spawn')
+# except RuntimeError:
+#     pass
+#from multiprocessing import set_start_method
+
+class RL_TD3(RL):
 	def __init__(self, env, hidden_layer=[64, 64]):
 		super().__init__(env, hidden_layer=hidden_layer)
 		self.env = env
@@ -15,15 +28,15 @@ class RL_SAC(RL):
 		self.num_outputs = env.action_space.shape[0]
 		self.hidden_layer = hidden_layer
 		self.params = Params()
-		self.actor = ActorNet(self.num_inputs, self.num_outputs,self.hidden_layer)
-		self.critic = ValueNet(self.num_inputs, self.hidden_layer)
-		self.q_function = QNet(self.num_inputs, self.num_outputs,self.hidden_layer)
-		self.q_function_target = QNet(self.num_inputs, self.num_outputs,self.hidden_layer)
+		self.actor = ActorNet(self.num_inputs, self.num_outputs,self.hidden_layer).to(device)
+		self.actor_target = ActorNet(self.num_inputs, self.num_outputs, self.hidden_layer).to(device)
+		self.actor_target.load_state_dict(self.actor.state_dict())
+		self.q_function = QNet(self.num_inputs, self.num_outputs,self.hidden_layer).to(device)
+		self.q_function_target = QNet(self.num_inputs, self.num_outputs,self.hidden_layer).to(device)
 		self.q_function_target.load_state_dict(self.q_function.state_dict())
 		#self.actor_target = ActorNet(self.num_inputs, num_outputs, self.hidden_layer)
 		#self.actor_target.load_state_dict(self.actor.state_dict())
 		self.q_function.share_memory()
-		self.critic.share_memory()
 		self.actor.share_memory()
 		self.q_function_target.share_memory()
 		self.shared_obs_stats = Shared_obs_stats(self.num_inputs)
@@ -42,24 +55,18 @@ class RL_SAC(RL):
 
 		self.off_policy_memory = ReplayMemory(300000)
 
-		self.q_function_optimizer = optim.Adam(self.q_function.parameters(), lr=self.lr, weight_decay=0e-3)
-		self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr, weight_decay=0e-3)
-		#self.q_function_optimizer = RAdam(self.q_function.parameters(), lr=self.lr, weight_decay=0e-3)
-		#self.actor_optimizer = RAdam(self.actor.parameters(), lr=self.lr, weight_decay=0e-3)
+		#self.q_function_optimizer = optim.Adam(self.q_function.parameters(), lr=self.lr, weight_decay=0e-3)
+		#self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr, weight_decay=0e-3)
+		self.q_function_optimizer = RAdam(self.q_function.parameters(), lr=self.lr, weight_decay=0e-3)
+		self.actor_optimizer = RAdam(self.actor.parameters(), lr=self.lr, weight_decay=0e-3)
 		self.actor.train()
 		self.q_function.train()
 
 		self.q_fucntion_scheduler = optim.lr_scheduler.ExponentialLR(self.q_function_optimizer, gamma=0.99)
 		self.actor_scheduler = optim.lr_scheduler.ExponentialLR(self.actor_optimizer, gamma=0.99)
 
-		self.actor_target = ActorNet(self.num_inputs, self.num_outputs, self.hidden_layer)
-		self.actor_target.load_state_dict(self.actor.state_dict())
-
 		self.off_policy_queue = mp.Queue()
 
-		self.log_alpha = torch.zeros(1, requires_grad=True)
-		self.alpha_optim = optim.Adam([self.log_alpha], lr=0.03)
-		self.alpha = self.log_alpha.exp()
 		self.reward_scale = 1
 		self.max_reward = mp.Value("f", 1)
 		#self.actor_target.share_memory()
@@ -77,7 +84,8 @@ class RL_SAC(RL):
 			total_reward = 0
 			num_step = 0
 			while True:
-				state = self.shared_obs_stats.normalize(state)
+				state = self.shared_obs_stats.normalize(state).to(device)
+				#print(self.actor.device)
 				action, _, mean, log_std = self.actor.sample(state)
 				#print("log std", log_std)
 				print(mean.data)
@@ -151,10 +159,10 @@ class RL_SAC(RL):
 			#print("something")
 			signal_init = self.traffic_light.get()
 			while samples < num_samples and not done:
-				state = self.shared_obs_stats.normalize(state)
-				states.append(state.data.numpy())
+				state = self.shared_obs_stats.normalize(state).to(device)
+				states.append(state.cpu().data.numpy())
 				if self.traffic_light.explore.value == False:# and random.randint(0,90)%100 > 0:
-					action, _, mean, _ = self.actor.sample(state)
+					action, _, mean, _ = self.actor.sample(state).detach()
 					action.detach()
 					mean.detach()
 					#print(action)
@@ -162,8 +170,8 @@ class RL_SAC(RL):
 					action = np.random.randint(-100, 100, size=(self.env.action_space.shape[0],))*1.0/100.0
 					#action = self.env.action_space.sample()
 					action = Variable(torch.Tensor(action).unsqueeze(0))
-				actions.append(action.data.numpy())
-				env_action = action.data.squeeze().numpy()
+				actions.append(action.cpu().data.numpy())
+				env_action = action.cpu().data.squeeze().numpy()
 
 				state, reward, done, _ = self.env.step(env_action)
 				if reward > self.max_reward.value:
@@ -177,7 +185,7 @@ class RL_SAC(RL):
 				state = Variable(torch.Tensor(state).unsqueeze(0))
 				#print(state.shape)
 				next_state = self.shared_obs_stats.normalize(state)
-				next_states.append(next_state.data.numpy())
+				next_states.append(next_state.cpu().data.numpy())
 				dones.append(Variable((1 - done) * torch.ones(1, 1)).data.numpy())
 				samples += 1
 				#done = (done or samples > num_samples)
@@ -220,11 +228,11 @@ class RL_SAC(RL):
 			batch_rewards2 = Variable(torch.Tensor(batch_rewards2 * self.reward_scale))
 			batch_dones2 = Variable(torch.Tensor(batch_dones2))
 
-			batch_states = torch.cat([batch_states, batch_states2], 0)
-			batch_next_states = torch.cat([batch_next_states, batch_next_states2], 0)
-			batch_actions = torch.cat([batch_actions, batch_actions2], 0)
-			batch_rewards = torch.cat([batch_rewards, batch_rewards2], 0) #/ self.max_reward.value
-			batch_dones = torch.cat([batch_dones, batch_dones2], 0)
+			batch_states = torch.cat([batch_states, batch_states2], 0).to(device)
+			batch_next_states = torch.cat([batch_next_states, batch_next_states2], 0).to(device)
+			batch_actions = torch.cat([batch_actions, batch_actions2], 0).to(device)
+			batch_rewards = torch.cat([batch_rewards, batch_rewards2], 0).to(device)
+			batch_dones = torch.cat([batch_dones, batch_dones2], 0).to(device)
 
 			#compute on policy actions for next state
 			batch_next_state_action, batch_next_log_prob,  batch_next_state_action_mean, _, = self.actor_target.sample(batch_next_states)
@@ -304,7 +312,6 @@ class RL_SAC(RL):
 		for t in ts:
 			t.start()
 			
-		self.model.set_noise(-2.0)
 		for iter in range(1000000):
 			while len(self.memory.memory) < 50000:
 				if self.counter.get() == self.num_threads:
@@ -338,9 +345,9 @@ class RL_SAC(RL):
 				if iter % 10 == 0:
 					self.run_test(num_test=2)
 					self.plot_statistics()
-					self.save_actor("torch_model/Walker2d_TD3.pt")
+					self.save_actor("torch_model/Humanoid_TD3.pt")
 					print(self.num_samples, self.test_mean[-1])
-					self.save_statistics("stats/Walker2d_td3_adam_seed1_Iter%d.stat"%(len(self.noisy_test_mean)))
+					self.save_statistics("stats/Humanoid_td3_radam_seed1_Iter%d.stat"%(len(self.noisy_test_mean)))
 				#self.update_critic(128, 64)
 				
 
@@ -368,9 +375,10 @@ if __name__ == '__main__':
 	#cfg_abs_path = parser.parse_args().cfg
 	#cfg = YAML().load(open(cfg_abs_path, 'r'))
 	import gym
-	env = gym.make("Walker2d-v2")#Environment(RaisimGymEnv(__RSCDIR__, dump(cfg['environment'], Dumper=RoundTripDumper)))
+	env = gym.make("Humanoid-v2")#Environment(RaisimGymEnv(__RSCDIR__, dump(cfg['environment'], Dumper=RoundTripDumper)))
 	env.seed(1)
-	sac = RL_SAC(env, [256, 256])
+	sac = RL_TD3(env, [256, 256])
+
 	sac.collect_samples_multithread()
 
 	start = t.time()

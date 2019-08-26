@@ -7,6 +7,7 @@ import torch.multiprocessing as mp
 from torch.distributions import Normal, Categorical
 import math
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class ActorCriticNet(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64]):
@@ -405,16 +406,19 @@ class ActorNet(nn.Module):
             x = F.relu(self.p_fcs[i+1](x))
             #log_std = F.relu(self.log_stds[i+1](log_std))
         #print(self.mu(x))
-        mu = F.tanh(self.mu(x))
+        mu = F.softsign(self.mu(x))
         #print(mu)
         log_std = Variable(self.noise * torch.ones(self.num_outputs)).unsqueeze(0).expand_as(mu)
+        #log_std.to(device)
         #log_std = F.tanh((self.log_std_linear(inputs)))
         #log_std = torch.clamp(log_std, min=-2, max=2)
         return mu, log_std
     def sample(self, inputs):
         mean, log_std = self.forward(inputs)
-        std = log_std.exp()
-        eps = torch.randn(mean.shape)
+        mean.to(device)
+        std = log_std.exp().to(device)
+        eps = torch.randn(mean.shape).to(device)
+        #print(std.device)
         #eps.clamp(-0.5, 0.5)
         #print(eps.data)
         #action = mean + noise

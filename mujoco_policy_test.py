@@ -35,6 +35,9 @@ num_outputs = env.action_space.shape[0]
 model = ActorCriticNetMixtureExpert(num_inputs, num_outputs, [256, 256])
 model.load_state_dict(torch.load("torch_model/Humanoid_ppo_seed1.pt"))
 
+actor = ActorNet(num_inputs, num_outputs, [256, 256])
+actor.load_state_dict(torch.load("torch_model/Humanoid_TD3.pt"))
+
 #with open('torch_model/Walker2D_2kHz_shared_obs_stats.pkl', 'rb') as input:
 #	shared_obs_stats = pickle.load(input)
 #with open('torch_model/cassie3dMirror2kHz_shared_obs_stats.pkl', 'rb') as input:
@@ -70,6 +73,7 @@ def run_test():
 				index, value = (state.abs()).max(1)
 				print(index, value)
 				mu = model.sample_best_actions(state)
+				mu, _ = actor(state)
 				#print(model.get_actions_difference(state))
 
 				env_action = mu.data.squeeze().numpy()
