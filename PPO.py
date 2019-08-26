@@ -285,6 +285,7 @@ class RL(object):
         total_reward = 0
         #q_value = Variable(torch.zeros(1, 1))
         while True:
+            self.model.load_state_dict(torch.load(self.model_name))
             signal_init = self.traffic_light.get()
             score = 0
             while samples < num_samples and not done:
@@ -481,7 +482,7 @@ class RL(object):
         self.start = time.time()
         self.lr = 1e-4
         self.weight = 10
-        num_threads = 10
+        num_threads = 100
         self.num_samples = 0
         self.time_passed = 0
         seeds = [
@@ -500,7 +501,6 @@ class RL(object):
         while True:
             if len(self.noisy_test_mean) % 100 == 1:
                 self.save_statistics("stats/Humanoid_ppo_seed1_Iter%d.stat"%(len(self.noisy_test_mean)))
-            self.save_model("torch_model/Humanoid_ppo_seed1.pt")
             #print(self.traffic_light.val.value)
             #if len(self.test_mean) % 100 == 1 and self.test_mean[len(self.test_mean)-1] > 300:
             #   self.save_model("torch_model/multiskill/v4_cassie3dMirrorIter%d.pt"%(len(self.test_mean),))
@@ -531,6 +531,7 @@ class RL(object):
             self.update_critic(min(128, len(self.memory.memory)), (len(self.memory.memory)//3000 + 1) * 64 * 2)
             self.update_actor(min(128, len(self.memory.memory)), (len(self.memory.memory)//3000 + 1) * 64 * 2, supervised=False)
             self.model.to("cpu")
+            self.save_model(self.model_name)
             self.clear_memory()
             self.run_test(num_test=2)
             self.run_test_with_noise(num_test=2)
@@ -562,6 +563,8 @@ if __name__ == '__main__':
     env = gym.make("Humanoid-v2")
     env.seed(1)
     ppo = RL(env, [256, 256])
+    ppo.model_name = "torch_model/Humanoid_ppo_seed1.pt"
+    ppo.save_model(ppo.model_name)
 
     ppo.collect_samples_multithread()
 
