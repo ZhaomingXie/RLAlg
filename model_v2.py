@@ -9,28 +9,23 @@ import math
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class ActorCriticNet(nn.Module):
-    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64], num_contact=0):
+    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64]):
         super(ActorCriticNet, self).__init__()
         self.num_outputs = num_outputs
         self.hidden_layer = hidden_layer
         self.p_fcs = nn.ModuleList()
         self.v_fcs = nn.ModuleList()
-        self.hidden_layer_v = [256, 256, 256, 256, 256, 256]
-        if (len(hidden_layer) > 0):
-            p_fc = nn.Linear(num_inputs, self.hidden_layer[0])
-            v_fc = nn.Linear(num_inputs, self.hidden_layer_v[0])
+        self.hidden_layer_v = [256, 256, 256]
+        p_fc = nn.Linear(num_inputs, self.hidden_layer[0])
+        v_fc = nn.Linear(num_inputs, self.hidden_layer_v[0])
+        self.p_fcs.append(p_fc)
+        self.v_fcs.append(v_fc)
+        for i in range(len(self.hidden_layer)-1):
+            p_fc = nn.Linear(self.hidden_layer[i], self.hidden_layer[i+1])
+            v_fc = nn.Linear(self.hidden_layer_v[i], self.hidden_layer_v[i+1])
             self.p_fcs.append(p_fc)
             self.v_fcs.append(v_fc)
-            for i in range(len(self.hidden_layer)-1):
-                p_fc = nn.Linear(self.hidden_layer[i], self.hidden_layer[i+1])
-                v_fc = nn.Linear(self.hidden_layer_v[i], self.hidden_layer_v[i+1])
-                self.p_fcs.append(p_fc)
-                self.v_fcs.append(v_fc)
-            self.mu = nn.Linear(self.hidden_layer[-1], num_outputs)
-        else:
-            #p_fc = nn.Linear(num_inputs, num_outputs)
-            #self.p_fcs.append(p_fc)
-            self.mu = nn.Linear(num_inputs, num_outputs)
+        self.mu = nn.Linear(self.hidden_layer[-1], num_outputs)
         self.log_std = nn.Parameter(torch.zeros(num_outputs),requires_grad=True)
         self.v = nn.Linear(self.hidden_layer_v[-1],1)
         self.noise = 0
@@ -38,13 +33,10 @@ class ActorCriticNet(nn.Module):
 
     def forward(self, inputs):
         # actor
-        if len(self.hidden_layer) > 0:
-            x = F.relu(self.p_fcs[0](inputs))
-            for i in range(len(self.hidden_layer)-1):
-                x = F.relu(self.p_fcs[i+1](x))
-            mu = torch.tanh(self.mu(x))
-        else:
-            mu = torch.tanh(self.mu(inputs))
+        x = F.relu(self.p_fcs[0](inputs))
+        for i in range(len(self.hidden_layer)-1):
+            x = F.relu(self.p_fcs[i+1](x))
+        mu = F.tanh(self.mu(x))
         log_std = Variable(self.noise*torch.ones(self.num_outputs)).unsqueeze(0).expand_as(mu)
 
         # critic
@@ -54,25 +46,6 @@ class ActorCriticNet(nn.Module):
         v = self.v(x)
         #print(mu)
         return mu, log_std, v
-
-    def get_log_stds(self, actions):
-        return Variable(torch.Tensor(self.noise)*torch.ones(self.num_outputs)).unsqueeze(0).expand_as(actions)
-        #return self.log_std.unsqueeze(0).expand_as(actions)
-
-    def sample_best_actions(self, inputs):
-        x = F.relu(self.p_fcs[0](inputs))
-        for i in range(len(self.hidden_layer)-1):
-            x = F.relu(self.p_fcs[i+1](x))
-        mu = F.tanh(self.mu(x))
-        return mu
-
-    def sample_actions(self, inputs):
-        mu = self.sample_best_actions(inputs)
-        log_std = self.get_log_stds(mu)
-        #std = torch.exp(log_std)
-        eps = torch.randn(mu.size())
-        actions = torch.clamp(mu + log_std.exp()*(eps), -1, 1)
-        return actions
 
     def set_noise(self, noise):
         self.noise = noise
@@ -85,40 +58,15 @@ class ActorCriticNet(nn.Module):
         log_std = Variable(self.noise*torch.ones(self.num_outputs)).unsqueeze(0).expand_as(mu)
         return mu, log_std
 
-    def get_value(self, inputs, device="cpu"):
+    def get_value(self, inputs):
         x = F.relu(self.v_fcs[0](inputs))
         for i in range(len(self.hidden_layer)-1):
             x = F.relu(self.v_fcs[i+1](x))
         v = self.v(x)
         return v
-    def calculate_prob_gpu(self, inputs, actions):
-        log_stds = self.get_log_stds(actions).to(device)
-        #print(log_stds.shape)
-        mean_actions = self.sample_best_actions(inputs)
-        #print(mean_actions.shape)
-        #w = self.get_w(inputs).to(device)
-        numer = ((actions - mean_actions) / (log_stds.exp())).pow(2)
-        log_probs = (-0.5 * numer).sum(dim=-1) - log_stds.sum(dim=-1)
-        #print(log_probs)
-        #probs = (log_probs.exp() * w.t()).sum(dim=0).log()
-        #print(probs)
-        return log_probs
-
-    def calculate_prob(self, inputs, actions):
-        log_stds = self.get_log_stds(actions)
-        #print(log_stds.shape)
-        mean_actions = self.sample_best_actions(inputs)
-        #print(mean_actions.shape)
-        #w = self.get_w(inputs).to(device)
-        numer = ((actions - mean_actions) / (log_stds.exp())).pow(2)
-        log_probs = (-0.5 * numer).sum(dim=-1) - log_stds.sum(dim=-1)
-        #print(log_probs)
-        #probs = (log_probs.exp() * w.t()).sum(dim=0).log()
-        #print(probs)
-        return log_probs
 
 class ActorCriticNetMixtureExpert(nn.Module):
-    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64], v_hidden_layer=[256, 256], w_hidden_layer=[256, 256], num_expert=1, num_contact=0):
+    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64], v_hidden_layer=[256, 256], w_hidden_layer=[256, 256], num_expert=1):
         super(ActorCriticNetMixtureExpert, self).__init__()
         self.num_outputs = num_outputs
         self.num_inputs = num_inputs
@@ -131,13 +79,13 @@ class ActorCriticNetMixtureExpert(nn.Module):
             expert_i = ActorCriticNet(num_inputs, num_outputs, hidden_layer)
             self.experts.append(expert_i)
 
-        # self.v_fcs = nn.ModuleList()
-        # v_fc = nn.Linear(num_inputs, self.v_hidden_layer[0])
-        # self.v_fcs.append(v_fc)
-        # for i in range(len(self.v_hidden_layer)-1):
-        #     v_fc = nn.Linear(self.v_hidden_layer[i], self.v_hidden_layer[i+1])
-        #     self.v_fcs.append(v_fc)
-        # self.v = nn.Linear(self.v_hidden_layer[-1],1)
+        self.v_fcs = nn.ModuleList()
+        v_fc = nn.Linear(num_inputs, self.v_hidden_layer[0])
+        self.v_fcs.append(v_fc)
+        for i in range(len(self.v_hidden_layer)-1):
+            v_fc = nn.Linear(self.v_hidden_layer[i], self.v_hidden_layer[i+1])
+            self.v_fcs.append(v_fc)
+        self.v = nn.Linear(self.v_hidden_layer[-1],1)
 
         self.w_fcs = nn.ModuleList()
         w_fc = nn.Linear(num_inputs, self.w_hidden_layer[0])
@@ -147,20 +95,21 @@ class ActorCriticNetMixtureExpert(nn.Module):
             self.w_fcs.append(w_fc)
         self.w = nn.Linear(self.w_hidden_layer[-1], num_expert)
         self.noise = -1
-        self.log_std = nn.Parameter(torch.zeros(num_outputs),requires_grad=True)
+        self.log_std = nn.Parameter(torch.ones(num_outputs)*-1,requires_grad=True)
 
-    def get_value(self, inputs, device="cpu"):
-        values = []
-        for i in range(self.num_expert):
-            value = self.experts[i].get_value(inputs)
-            values.append(value)
-        w = self.get_w(inputs)
-        categorical = Categorical(w)
-        pis = list(categorical.sample().data)
-        return_v = torch.zeros(inputs.shape[0], 1)
-        for i, j in enumerate(pis):
-            return_v[i] = (values[j][i])
-        return return_v.to(device)
+        # for module in self.experts:
+        #     from torch.nn import init
+        #     for p in module.p_fcs:
+        #         #init.xavier_uniform_(p.weight)
+        #         init.normal_(p.weight, std=0.2)
+                #p.weight.data.uniform_(-0.2, 0.2)
+
+    def get_value(self, inputs):
+        x = F.relu(self.v_fcs[0](inputs))
+        for i in range(len(self.v_hidden_layer)-1):
+            x = F.relu(self.v_fcs[i+1](x))
+        v = self.v(x)
+        return v
 
     def forward(self, inputs):
         actions = self.get_mean_actions(inputs)
@@ -192,20 +141,19 @@ class ActorCriticNetMixtureExpert(nn.Module):
 
     def sample_actions(self, inputs):
         actions = self.get_mean_actions(inputs)
-        #print("list", actions)
         w = self.get_w(inputs)
+        #print(w)
         categorical = Categorical(w)
         pis = list(categorical.sample().data)
-        #print(pis)
         log_std = self.get_log_stds(actions[0])#Variable(self.noise*torch.ones(self.num_outputs)).unsqueeze(0).expand_as(actions[0])
         #print(log_std)
         std = torch.exp(log_std)
         sample = Variable(std.data.new(std.size(0), std.size(1)).normal_())
         for i, j in enumerate(pis):
+            #print(std[i])
             sample[i] = sample[i].mul(std[i]).add(actions[j][i])
         #sample[:, 0:3] *= 0
-        #sample[:, 11:17] *= 0
-        #print("sample", sample)    
+        #sample[:, 11:17] *= 0    
         return sample
 
     def sample_best_actions(self, inputs):
@@ -236,7 +184,7 @@ class ActorCriticNetMixtureExpert(nn.Module):
         #print(log_stds.shape)
         mean_actions = torch.stack(self.get_mean_actions(inputs))
         #print(mean_actions.shape)
-        w = self.get_w(inputs).to(device)
+        w = self.get_w(inputs)
         numer = ((actions - mean_actions) / (log_stds.exp())).pow(2)
         log_probs = (-0.5 * numer).sum(dim=-1) - log_stds.sum(dim=-1)
         #print(log_probs)
@@ -259,33 +207,187 @@ class ActorCriticNetMixtureExpert(nn.Module):
     def set_noise(self, noise):
         self.noise = noise
 
-class ActorCriticNetWithContact(ActorCriticNetMixtureExpert):
-    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64], v_hidden_layer=[256, 256], w_hidden_layer=[256, 256], num_contact=1):
-        self.num_contact = num_contact
-        num_expert = self.num_contact**2
-        super().__init__(num_inputs, num_outputs, hidden_layer=hidden_layer, v_hidden_layer=v_hidden_layer, w_hidden_layer=w_hidden_layer, num_expert=num_expert)
-    def get_w(self, inputs):
-        # x = F.relu(self.w_fcs[0](inputs))
-        # for i in range(len(self.w_hidden_layer)-1):
-        #     x = F.relu(self.w_fcs[i+1](x))
-        # w = self.w(x)
-        # #w = torch.ones(inputs.size()[0], self.num_expert)
-        # w = F.softmax(w, dim=-1)
-        #print(w)
-        w = torch.ones(inputs.size()[0], self.num_expert)
-        #print(w.shape)
-        if self.num_expert == 2:
-            w[:, 0] = (inputs[:, -1] > 0.1)
-            w[:, 1] = (inputs[:, -1] < 0.1)
-        elif self.num_expert == 4:
-            #print(inputs[:, -1].shape)
-            w[:, 0] = ((inputs[:, -1] > 0.1) & (inputs[:, -2] > 0.1))
-            w[:, 1] = ((inputs[:, -1] > 0.1) & (inputs[:, -2] < 0.1))
-            w[:, 2] = ((inputs[:, -1] < 0.1) & (inputs[:, -2] > 0.1))
-            w[:, 3] = ((inputs[:, -1] < 0.1) & (inputs[:, -2] < 0.1))
-        w.float()
-        return w
+class ActorCriticNetWithPhase(ActorCriticNet):
+    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64], cat_index=46):
+        super().__init__(num_inputs, num_outputs, hidden_layer)
+        self.p_fcs = nn.ModuleList()
+        self.v_fcs = nn.ModuleList()
+        self.hidden_layer_v = [256, 256, 256]
+        p_fc = nn.Linear(46, self.hidden_layer[0])
+        v_fc = nn.Linear(num_inputs, self.hidden_layer_v[0])
+        self.p_fcs.append(p_fc)
+        self.v_fcs.append(v_fc)
+        for i in range(len(self.hidden_layer)-1):
+            if i == 0:
+                p_fc = nn.Linear(self.hidden_layer[i] + 2, self.hidden_layer[i+1])
+                v_fc = nn.Linear(self.hidden_layer_v[i], self.hidden_layer_v[i+1])
+            else:
+                p_fc = nn.Linear(self.hidden_layer[i], self.hidden_layer[i+1])
+                v_fc = nn.Linear(self.hidden_layer_v[i], self.hidden_layer_v[i+1])
+            self.p_fcs.append(p_fc)
+            self.v_fcs.append(v_fc)
+        self.mu = nn.Linear(self.hidden_layer[-1], num_outputs)
+        self.log_std = nn.Parameter(torch.zeros(num_outputs),requires_grad=True)
+        self.v = nn.Linear(self.hidden_layer_v[-1],1)
+        self.cat_index = cat_index
+    def forward(self, inputs):
+        # actor
+        x = F.relu(self.p_fcs[0](inputs[:, 0:46]))
+        for i in range(len(self.hidden_layer)-1):
+            if i == 0:
+                x = torch.cat([x, inputs[:, self.cat_index:self.cat_index+2]], 1)
+            x = F.relu(self.p_fcs[i+1](x))
+        mu = F.tanh(self.mu(x))
+        log_std = Variable(self.noise*torch.ones(self.num_outputs)).unsqueeze(0).expand_as(mu)
 
+        # critic
+        x = F.relu(self.v_fcs[0](inputs))
+        for i in range(len(self.hidden_layer)-1):
+            x = F.relu(self.v_fcs[i+1](x))
+        v = self.v(x)
+        #print(mu)
+        return mu, log_std, v
+
+class ActorCriticNetWithBias(ActorCriticNet):
+    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64], cat_index=46):
+        super().__init__(num_inputs, num_outputs, hidden_layer)
+        self.p_fcs = nn.ModuleList()
+        self.v_fcs = nn.ModuleList()
+        self.hidden_layer_v = [256, 256]
+        p_fc = nn.Linear(num_inputs, self.hidden_layer[0])
+        v_fc = nn.Linear(num_inputs, self.hidden_layer_v[0])
+        self.p_fcs.append(p_fc)
+        self.v_fcs.append(v_fc)
+        for i in range(len(self.hidden_layer)-1):
+            if i == 0:
+                p_fc = nn.Linear(self.hidden_layer[i], self.hidden_layer[i+1])
+                v_fc = nn.Linear(self.hidden_layer_v[i], self.hidden_layer_v[i+1])
+            else:
+                p_fc = nn.Linear(self.hidden_layer[i], self.hidden_layer[i+1])
+                v_fc = nn.Linear(self.hidden_layer_v[i], self.hidden_layer_v[i+1])
+            self.p_fcs.append(p_fc)
+            self.v_fcs.append(v_fc)
+        self.mu = nn.Linear(self.hidden_layer[-1], num_outputs)
+        self.log_std = nn.Parameter(torch.zeros(num_outputs),requires_grad=True)
+        self.v = nn.Linear(self.hidden_layer_v[-1],1)
+        self.cat_index = cat_index
+    def forward(self, inputs):
+        # actor
+        x = F.relu(self.p_fcs[0](inputs))
+        for i in range(len(self.hidden_layer)-1):
+            x = F.relu(self.p_fcs[i+1](x))
+        mu = F.tanh(self.mu(x))
+        log_std = Variable(self.noise*torch.ones(self.num_outputs)).unsqueeze(0).expand_as(mu)
+
+        # critic
+        x = F.relu(self.v_fcs[0](inputs))
+        for i in range(len(self.hidden_layer)-1):
+            x = F.relu(self.v_fcs[i+1](x))
+        v = self.v(x)
+        #print(mu)
+        return mu, log_std, v
+
+class ActorCriticNetWithHeightMap(ActorCriticNet):
+    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64]):
+        super(ActorCriticNetWithHeightMap, self).__init__()
+        self.height_map_dim = [512, 512]
+        self.height_map = np.zeros((512, 512))
+
+        self.conv1 = nn.Sequential(nn.Conv2d(1, 16, 11, stride=3, padding=0),nn.ReLU(), nn.MaxPool2d(2))
+        self.conv2 = nn.Sequential(nn.Conv2d(16, 32, 9, stride=3, padding=0),nn.ReLU(), nn.MaxPool2d(2))
+        self.conv3 = nn.Sequential(nn.Conv2d(32, 32, 3, stride=3, padding=1),nn.ReLU())
+        self.fc = nn.Linear(5*5*32, 128)
+        self.p_fcs[0] = nn.Linear(num_inputs + 128, self.hidden_layer[0])
+        self.v_fcs[0] = nn.Linear(num_inputs + 128, self.hidden_layer[0])
+
+    def set_height_map(self, height_map):
+        self.height_map = np.copy(height_map)
+
+    def forward(self, input):
+        hegiht_map = Variable(torch.Tensor(self.hegiht_map).unsqueeze(0))
+        height_map_output = self.conv1(height_map)
+        height_map_output = self.conv2(height_map_output)
+        height_map_output = self.conv3(height_map_output)
+        height_map_output = self.out_view(out.size(0), -1)
+        height_map_output = self.fc(height_map_output)
+        x = F.relu(self.p_fc[0](torch.cat([input, height_map_output])))
+        for i in range(len(self.hidden_layer)-1):
+            x = F.relu(self.p_fcs[i+1](x))
+        mu = F.tanh(self.mu(x))
+        log_std = Variable(self.noise*torch.ones(self.num_outputs)).unsqueeze(0).expand_as(mu)
+
+        # critic
+        x = F.relu(self.v_fcs[0](torch.cat([inputs2, height_map_output])))
+        for i in range(len(self.hidden_layer)-1):
+            x = F.relu(self.v_fcs[i+1](x))
+        v = self.v(x)
+        #print(mu)
+        return mu, log_std, v
+
+class ActorCriticNetWithMultiRobot(ActorCriticNet):
+    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64], num_robots=1):
+        #super().__init__(num_inputs, num_outputs, hidden_layer=hidden_layer)
+        super(ActorCriticNet, self).__init__()
+        self.hidden_layer_v = [256, 256]
+        self.num_outputs = num_outputs
+        self.hidden_layer = hidden_layer
+        self.noise = 0
+        
+        #robot specific modules
+        self.robot_policy_input_modules = nn.ModuleList()
+        self.robot_value_input_modules = nn.ModuleList()
+        self.robot_policy_output_modules = nn.ModuleList()
+        self.robot_value_output_modules = nn.ModuleList()
+        for i in range(num_robots):
+            p_fc = nn.Linear(num_inputs, self.hidden_layer[0])
+            v_fc = nn.Linear(num_inputs, self.hidden_layer_v[0])
+            p_fc.weight.data.fill_(0.01)
+            p_fc.bias.data.fill_(0.01)
+            v_fc.weight.data.fill_(0.01)
+            v_fc.bias.data.fill_(0.01)
+            self.robot_policy_input_modules.append(p_fc)
+            self.robot_value_input_modules.append(v_fc)
+
+            p_fc = nn.Linear(self.hidden_layer[-1], self.num_outputs)
+            v_fc = nn.Linear(self.hidden_layer_v[-1], 1)
+            p_fc.weight.data.fill_(0.01)
+            p_fc.bias.data.fill_(0.01)
+            v_fc.weight.data.fill_(0.01)
+            v_fc.bias.data.fill_(0.01)
+            self.robot_policy_output_modules.append(p_fc)
+            self.robot_value_output_modules.append(v_fc)
+
+        #common modules
+        self.p_fcs = nn.ModuleList()
+        self.v_fcs = nn.ModuleList()
+        for i in range(len(self.hidden_layer)-1):
+            p_fc = nn.Linear(self.hidden_layer[i], self.hidden_layer[i+1])
+            self.p_fcs.append(p_fc)
+        for i in range(len(self.hidden_layer_v)-1):
+            v_fc = nn.Linear(self.hidden_layer_v[i], self.hidden_layer_v[i+1])
+            self.v_fcs.append(v_fc)
+
+    def compute_robot_action(self, inputs, robot_id=0):
+        x = F.relu(self.robot_policy_input_modules[robot_id](inputs))
+        for i in range(len(self.hidden_layer)-1):
+            x = F.relu(self.p_fcs[i](x))
+        mu = F.tanh(self.robot_policy_output_modules[robot_id](x))
+        log_std = Variable(self.noise*torch.ones(self.num_outputs)).unsqueeze(0).expand_as(mu)
+
+        x = F.relu(self.robot_value_input_modules[robot_id](inputs))
+        for i in range(len(self.hidden_layer_v)-1):
+            x = F.relu(self.v_fcs[i](x))
+        v = (self.robot_value_output_modules[robot_id](x))
+        return mu, log_std, v
+
+    #by default, use the first robot's parameter to do inference
+    def forward(self, inputs):
+        return self.compute_robot_action(inputs, robot_id=0)
+
+    def one_step_inference(self, inputs, robot_id=0):
+        x_policy = F.relu(self.robot_policy_input_modules[robot_id](inputs))
+        x_value = F.relu(self.robot_value_input_modules[robot_id](inputs))
+        return x_policy, x_value
 
 class ActorNet(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64]):
@@ -320,7 +422,7 @@ class ActorNet(nn.Module):
         #print(mu)
         log_std = Variable(self.noise * torch.ones(self.num_outputs)).unsqueeze(0).expand_as(mu)
         #log_std.to(device)
-        #log_std = torch.tanh((self.log_std_linear(inputs)))
+        #log_std = F.tanh((self.log_std_linear(inputs)))
         #log_std = torch.clamp(log_std, min=-2, max=2)
         return mu, log_std
     def sample_gpu(self, inputs):

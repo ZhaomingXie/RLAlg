@@ -39,7 +39,7 @@ class RL_TD3(RL):
 		self.q_function_target.share_memory()
 		self.actor_target.share_memory()
 		self.shared_obs_stats = Shared_obs_stats(self.num_inputs)
-		self.memory = ReplayMemory(self.params.num_steps * 10000)
+		self.memory = ReplayMemory(1e8)
 		self.test_mean = []
 		self.test_std = []
 		self.lr = 1e-4
@@ -52,7 +52,7 @@ class RL_TD3(RL):
 		self.traffic_light = TrafficLight()
 		self.counter = Counter()
 
-		self.off_policy_memory = ReplayMemory(300000)
+		self.off_policy_memory = ReplayMemory(1e8)
 
 		#self.q_function_optimizer = optim.Adam(self.q_function.parameters(), lr=self.lr, weight_decay=0e-3)
 		#self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr, weight_decay=0e-3)
@@ -67,7 +67,7 @@ class RL_TD3(RL):
 		self.off_policy_queue = mp.Queue()
 
 		self.reward_scale = 1
-		self.max_reward = mp.Value("f", 1)
+		self.max_reward = mp.Value("f", 50)
 		#self.actor_target.share_memory()
 
 	def run_test(self, num_test=1):
@@ -176,7 +176,7 @@ class RL_TD3(RL):
 
 				state, reward, done, _ = self.env.step(env_action)
 				if reward > self.max_reward.value:
-					self.max_reward.value = reward
+					self.max_reward.value = min(reward, 50.0)
 				#print(env_action)
 				#print(samples, env_action, reward, state)
 
@@ -214,28 +214,113 @@ class RL_TD3(RL):
 			q_values = []
 			dones = []
 
+	def collect_expert_samples(self, num_samples, filename, noise=-2.0,validation=False, difficulty=[0, 0]):
+		import gym
+		expert_env = gym.make("mocca_envs:Walker3DStepperEnv-v0")
+		expert_env.set_difficulty(difficulty)
+		start_state = expert_env.reset()
+		samples = 0
+		done = False
+		states = []
+		next_states = []
+		actions = []
+		rewards = []
+		q_values = []
+		dones = []
+		model_expert = self.Net(self.num_inputs, self.num_outputs,[256, 256, 256, 256, 256])
+
+		model_expert.load_state_dict(torch.load(filename))
+		policy_noise = noise * np.ones(self.num_outputs)
+		model_expert.set_noise(policy_noise)
+
+		state = start_state
+		state = Variable(torch.Tensor(state).unsqueeze(0))
+		total_reward = 0
+		total_sample = 0
+		#q_value = Variable(torch.zeros(1, 1))
+		if validation:
+			max_sample = 300
+		else:
+			max_sample = 10000
+		while total_sample < max_sample:
+			score = 0
+			while samples < num_samples and not done:
+				state = self.shared_obs_stats.normalize(state)
+
+				states.append(state.data.numpy())
+				mu = model_expert.sample_best_actions(state)
+				actions.append(mu.data.numpy())
+				eps = torch.randn(mu.size())
+				if validation:
+					weight = 0.1
+				else:
+					weight = 0.1
+				env_action = model_expert.sample_actions(state)
+				env_action = env_action.data.squeeze().numpy()
+				
+				state, reward, done, _ = expert_env.step(env_action)
+				dones.append(Variable((1 - done) * torch.ones(1, 1)).data.numpy())
+				rewards.append(Variable(reward * torch.ones(1, 1)).data.numpy())
+				state = Variable(torch.Tensor(state).unsqueeze(0))
+
+				next_state = self.shared_obs_stats.normalize(state)
+				next_states.append(next_state.data.numpy())
+
+				samples += 1
+				#total_sample += 1
+				score += reward
+			print("expert score", score)
+			# state = self.shared_obs_stats.normalize(state)
+			# v = model_expert.get_value(state)
+			# if done:
+			#     R = torch.zeros(1, 1)
+			# else:
+			#     R = v.data
+			#     R = torch.ones(1, 1) * 100
+			# R = Variable(R)
+			# for i in reversed(range(len(rewards))):
+			#     R = self.params.gamma * R + Variable(torch.from_numpy(rewards[i]))
+			#     q_values.insert(0, R.data.numpy())
+			
+			if not validation and score >= num_samples:
+				self.off_policy_memory.push([states, actions, next_states, rewards, dones])
+				total_sample += num_samples
+			elif score >= num_samples:
+				self.validation_trajectory.push([states, actions, next_states, rewards, dones])
+			start_state = expert_env.reset()
+			state = start_state
+			state = Variable(torch.Tensor(state).unsqueeze(0))
+			total_reward = 0
+			samples = 0
+			done = False
+			states = []
+			next_states = []
+			actions = []
+			rewards = []
+			q_values = []
+
 	def update_q_function(self, batch_size, num_epoch, update_actor=False):
 		for k in range(num_epoch):
 			batch_states, batch_actions, batch_next_states, batch_rewards, batch_dones = self.off_policy_memory.sample(batch_size)
-			batch_states2, batch_actions2, batch_next_states2, batch_rewards2, batch_dones2 = self.memory.sample(self.num_threads)
+			# batch_states2, batch_actions2, batch_next_states2, batch_rewards2, batch_dones2 = self.memory.sample(self.num_threads)
 
-			batch_states = Variable(torch.Tensor(batch_states))
-			batch_next_states = Variable(torch.Tensor(batch_next_states))
-			batch_actions = Variable(torch.Tensor(batch_actions))
-			batch_rewards = Variable(torch.Tensor(batch_rewards * self.reward_scale))
-			batch_dones = Variable(torch.Tensor(batch_dones))
+			batch_states = Variable(torch.Tensor(batch_states)).to(device)
+			batch_next_states = Variable(torch.Tensor(batch_next_states)).to(device)
+			batch_actions = Variable(torch.Tensor(batch_actions)).to(device)
+			batch_rewards = Variable(torch.Tensor(batch_rewards / self.max_reward.value)).to(device)
+			batch_dones = Variable(torch.Tensor(batch_dones)).to(device)
 
-			batch_states2 = Variable(torch.Tensor(batch_states2))
-			batch_next_states2 = Variable(torch.Tensor(batch_next_states2))
-			batch_actions2 = Variable(torch.Tensor(batch_actions2))
-			batch_rewards2 = Variable(torch.Tensor(batch_rewards2 * self.reward_scale))
-			batch_dones2 = Variable(torch.Tensor(batch_dones2))
+			# batch_states2 = Variable(torch.Tensor(batch_states2))
+			# batch_next_states2 = Variable(torch.Tensor(batch_next_states2))
+			# batch_actions2 = Variable(torch.Tensor(batch_actions2))
+			# batch_rewards2 = Variable(torch.Tensor(batch_rewards2 * self.reward_scale))
+			# batch_dones2 = Variable(torch.Tensor(batch_dones2))
 
-			batch_states = torch.cat([batch_states, batch_states2], 0).to(device)
-			batch_next_states = torch.cat([batch_next_states, batch_next_states2], 0).to(device)
-			batch_actions = torch.cat([batch_actions, batch_actions2], 0).to(device)
-			batch_rewards = torch.cat([batch_rewards, batch_rewards2], 0).to(device)
-			batch_dones = torch.cat([batch_dones, batch_dones2], 0).to(device)
+			# batch_states = torch.cat([batch_states, batch_states2], 0).to(device)
+			# batch_next_states = torch.cat([batch_next_states, batch_next_states2], 0).to(device)
+			# batch_actions = torch.cat([batch_actions, batch_actions2], 0).to(device)
+			# batch_rewards = torch.cat([batch_rewards, batch_rewards2], 0).to(device)
+			# batch_dones = torch.cat([batch_dones, batch_dones2], 0).to(device)
 
 			#compute on policy actions for next state
 			batch_next_state_action, batch_next_log_prob,  batch_next_state_action_mean, _, = self.actor_target.sample_gpu(batch_next_states)
@@ -248,9 +333,11 @@ class RL_TD3(RL):
 			
 			#q value estimate
 			q1, q2 = self.q_function(batch_states, batch_actions)
+			#print(q1.shape, value.shape)
 			q1_value_loss = F.mse_loss(q1, value)
 			q2_value_loss = F.mse_loss(q2, value)
 			q_value_loss = q1_value_loss + q2_value_loss
+			#print(q_value_loss)
 
 			self.q_function_optimizer.zero_grad()
 			q_value_loss.backward()
@@ -262,7 +349,7 @@ class RL_TD3(RL):
 			mean_action, log_std = self.actor(batch_states)
 			q1_new, q2_new = self.q_function(batch_states, mean_action)
 			new_q_value = torch.min(q1_new, q2_new)# - self.critic(batch_states)
-			policy_loss = (-new_q_value).mean()# + self.action_weight *(mean_action**2).mean()
+			policy_loss = (-new_q_value).mean() + self.action_weight *(mean_action**2).mean()
 			#print("policy_loss",  (-new_q_value).mean())
 			#print("log_prob", log_prob.shape, new_q_value.shape)
 			
@@ -283,11 +370,12 @@ class RL_TD3(RL):
 		import time
 		self.num_samples = 0
 		self.start = time.time()
-		self.num_threads = 10
-		self.action_weight = 0
-		self.lr = 3e-4
+		self.num_threads = 1
+		self.action_weight = 0.01
+		self.lr = 1e-4
 		self.traffic_light.explore.value = True
 		self.time_passed = 0
+		max_samples = 0
 		seeds = [
 			np.random.randint(0, 4294967296) for _ in range(self.num_threads)
 		]
@@ -300,7 +388,7 @@ class RL_TD3(RL):
 			t.start()
 			
 		for iter in range(1000000):
-			while len(self.memory.memory) < 50000:
+			while len(self.memory.memory) < max_samples:
 				if self.counter.get() == self.num_threads:
 					for i in range(self.num_threads):
 						#if random.randint(0, 1) == 0:
@@ -325,9 +413,10 @@ class RL_TD3(RL):
 				self.q_function.to(device)
 				self.actor_target.to(device)
 				self.q_function_target.to(device)
-				for policy_update in range(len(self.memory.memory)):
+				#for policy_update in range(len(self.memory.memory)):
+				for policy_update in range(32):
 					if policy_update % 2 == 0:
-						self.update_q_function(128, 1)
+						self.update_q_function(128, 100)
 					else:
 						self.update_q_function(128, 1, update_actor=True)
 						self.update_q_target(0.005)
@@ -344,10 +433,7 @@ class RL_TD3(RL):
 					self.run_test(num_test=2)
 					self.plot_statistics()
 					print(self.num_samples, self.test_mean[-1])
-					self.save_statistics("stats/Humanoid_td3_radam_seed1_Iter%d.stat"%(len(self.noisy_test_mean)))
-				#self.update_critic(128, 64)
 				
-
 			self.off_policy_memory.memory = self.off_policy_memory.memory + self.memory.memory
 			#if (math.isnan(len(self.memory.memory))):
 			#	print(self.memory.memory)
@@ -373,11 +459,17 @@ if __name__ == '__main__':
 	#cfg_abs_path = parser.parse_args().cfg
 	#cfg = YAML().load(open(cfg_abs_path, 'r'))
 	import gym
-	env = gym.make("Humanoid-v2")#Environment(RaisimGymEnv(__RSCDIR__, dump(cfg['environment'], Dumper=RoundTripDumper)))
+	env = gym.make("mocca_envs:Walker3DStepperEnv-v0")#Environment(RaisimGymEnv(__RSCDIR__, dump(cfg['environment'], Dumper=RoundTripDumper)))
 	env.seed(1)
 	sac = RL_TD3(env, [256, 256])
-	sac.model_path = "torch_model/Humanoid_TD3.pt"
+	sac.model_path = "torch_model/stepper_TD3_master.pt"
 	sac.save_actor(sac.model_path)
+	sac.collect_expert_samples(500, "torch_model/Stepper256X5_65_00_seed8.pt", noise=-2.0, difficulty = [0.65, 0])
+	sac.collect_expert_samples(500, "torch_model/Stepper256X5_75_00_seed8.pt", noise=-2.0, difficulty = [0.75, 0])
+	sac.collect_expert_samples(500, "torch_model/Stepper256X5_85_00_seed8.pt", noise=-2.0, difficulty = [0.85, 0])
+	sac.collect_expert_samples(500, "torch_model/Stepper256X5_65_10_seed8.pt", noise=-2.0, difficulty = [0.65, 10])
+
+	sac.env.set_difficulty([0.65, 10])
 
 	sac.collect_samples_multithread()
 

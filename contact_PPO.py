@@ -18,7 +18,7 @@ from params import Params
 import pickle
 import time as t
 
-from model import ActorCriticNet, Shared_obs_stats, ActorCriticNetMixtureExpert
+from model import ActorCriticNet, Shared_obs_stats, ActorCriticNetWithContact
 
 import statistics
 import matplotlib.pyplot as plt
@@ -37,6 +37,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #     mp.set_start_method('spawn')
 # except RuntimeError:
 #     pass
+import sys
+sys.path.append('/home/zhaoming/Documents/dev/gym/gym/envs/mujoco')
 
 class ReplayMemory(object):
     def __init__(self, capacity):
@@ -98,17 +100,20 @@ def normal(x, mu, log_std):
     return a-b
 
 class RL(object):
-    def __init__(self, env, hidden_layer=[64, 64]):
+    def __init__(self, env, hidden_layer=[64, 64], contact=False):
         self.env = env
         #self.env.env.disableViewer = False
         self.num_inputs = env.observation_space.shape[0]
         self.num_outputs = env.action_space.shape[0]
         self.hidden_layer = hidden_layer
+        self.num_contact = 2
 
         self.params = Params()
-
-        self.Net = ActorCriticNet
-        self.model = self.Net(self.num_inputs, self.num_outputs,self.hidden_layer)
+        if contact:
+            self.Net = ActorCriticNetWithContact
+        else:
+            self.Net = ActorCriticNet
+        self.model = self.Net(self.num_inputs, self.num_outputs, self.hidden_layer, num_contact=self.num_contact)
         self.model.share_memory()
         self.shared_obs_stats = Shared_obs_stats(self.num_inputs)
         self.memory = ReplayMemory(10000000)
@@ -148,7 +153,7 @@ class RL(object):
 
         self.return_obs_stats = Shared_obs_stats(1)
 
-        self.gpu_model = self.Net(self.num_inputs, self.num_outputs,self.hidden_layer)
+        self.gpu_model = self.Net(self.num_inputs, self.num_outputs,self.hidden_layer, num_contact=self.num_contact)
 
         self.base_controller = None
 
@@ -189,7 +194,7 @@ class RL(object):
                 mu = self.model.sample_best_actions(state)
                 action = mu.cpu().data.squeeze().numpy()
                 if self.base_controller is not None:
-                    base_action = self.base_controller.sample_best_actions(state[:, 0:self.base_dim])
+                    base_action = self.base_controller.sample_best_actions(state)
                     action += base_action.cpu().data.squeeze().numpy()
                 state, reward, done, _ = self.env.step(action)
                 total_reward += reward
@@ -226,10 +231,11 @@ class RL(object):
             while True:
                 state = self.shared_obs_stats.normalize(state)
                 mu = self.model.sample_actions(state)
-                #eps = torch.randn(mu.size())
-                action = mu.cpu().data.squeeze().numpy()
+                eps = torch.randn(mu.size())
+                action = (mu + 0.0*Variable(eps))
+                action = action.cpu().data.squeeze().numpy()
                 if self.base_controller is not None:
-                    base_action = self.base_controller.sample_best_actions(state[:, 0:self.base_dim])
+                    base_action = self.base_controller.sample_best_actions(state)
                     action += base_action.cpu().data.squeeze().numpy()
                 state, reward, done, _ = self.env.step(action)
                 total_reward += reward
@@ -318,12 +324,12 @@ class RL(object):
                 action = self.model.sample_actions(state)
                 log_prob = self.model.calculate_prob(state, action)
 
-                actions.append(np.copy(action.cpu().data.numpy()))
+                actions.append(action.cpu().data.numpy())
                 log_probs.append(log_prob.data.numpy())
                
                 env_action = action.data.squeeze().numpy()
                 if self.base_controller is not None:
-                    base_action = self.base_controller.sample_best_actions(state[:, 0:self.base_dim])
+                    base_action = self.base_controller.sample_best_actions(state)
                     env_action += base_action.cpu().data.squeeze().numpy()
                 state, reward, done, _ = self.env.step(env_action)
                 score += reward
@@ -347,8 +353,8 @@ class RL(object):
             state = self.shared_obs_stats.normalize(state)
 
             v = (self.model.get_value(state))*self.max_reward.value# / self.return_obs_stats.std) + self.return_obs_stats.mean
-            # if self.base_controller is not None:
-            #     v += self.base_controller.get_value(state)*self.max_reward.value
+            if self.base_controller is not None:
+                v += self.base_controller.get_value(state)*self.max_reward.value
             if done:
                 R = torch.zeros(1, 1)
             else:
@@ -396,13 +402,6 @@ class RL(object):
             #self.value_queue.put([value_states, value_actions, value_next_states, value_rewards, value_q_values, value_log_probs])
             self.counter.increment()
             self.env.reset()
-            #print(self.model.noise)
-            #print(score)
-            #if score > self.best_score.value:
-                #self.best_score_queue.put([states, actions, next_states, rewards, q_values])
-                #self.best_score.value = score
-            #    print("best score", self.best_score.value)
-                #self.max_reward.value = self.best_score.value / samples * 99
            
             while self.traffic_light.get() == signal_init:
                 pass
@@ -525,9 +524,9 @@ class RL(object):
             batch_states, batch_actions, batch_next_states, batch_rewards, batch_q_values, _ = self.memory.sample(batch_size)
             batch_states = self.shared_obs_stats.normalize(Variable(torch.Tensor(batch_states))).to(device)
             batch_q_values = Variable(torch.Tensor(batch_q_values)).to(device) / self.max_reward.value
-            v_pred = self.gpu_model.get_value(batch_states)
-            # if self.base_controller is not None:
-            #     v_pred = self.base_controller.get_value(batch_states) + v_pred
+            v_pred = self.gpu_model.get_value(batch_states, device=device)
+            if self.base_controller is not None:
+                v_pred = self.base_controller.get_value(batch_states) + v_pred
             loss_value = (v_pred - batch_q_values)**2
             loss_value = 0.5*torch.mean(loss_value)
             optimizer.zero_grad()
@@ -536,7 +535,7 @@ class RL(object):
             #print(loss_value)
 
     def update_actor(self, batch_size, num_epoch, supervised=False):
-        model_old = self.Net(self.num_inputs, self.num_outputs, self.hidden_layer).to(device)
+        model_old = self.Net(self.num_inputs, self.num_outputs, self.hidden_layer, num_contact=self.num_contact).to(device)
         model_old.load_state_dict(self.gpu_model.state_dict())
         model_old.set_noise(self.model.noise)
         self.gpu_model.train()
@@ -552,21 +551,10 @@ class RL(object):
             batch_q_values = Variable(torch.Tensor(batch_q_values)).to(device) / self.max_reward.value
             #batch_q_values = self.return_obs_stats.normalize(Variable(torch.Tensor(batch_q_values)))
             batch_actions = Variable(torch.Tensor(batch_actions)).to(device)
-            v_pred_old = model_old.get_value(batch_states)
-            # if self.base_controller is not None:
-            #     v_pred_old += self.base_controller.get_value(batch_states)
+            v_pred_old = model_old.get_value(batch_states, device=device)
+            if self.base_controller is not None:
+                v_pred_old += self.base_controller.get_value(batch_states)
             batch_advantages = (batch_q_values - v_pred_old)
-            #probs_old = model_old.calculate_prob_gpu(batch_states, batch_actions)
-            #probs = self.model.calculate_prob_gpu(batch_states, batch_actions)
-
-            #mu_old = model_old.get_mean_actions(batch_states)[0]
-            #mu = self.model.get_mean_actions(batch_states)[0]
-            # log_std_old = model_old.get_log_stds(mu_old)
-            # log_std = self.model.get_log_stds(mu)
-            # probs_old = normal(batch_actions, mu_old, log_std_old)
-            # probs = normal(batch_actions, mu, log_std)
-            # ratio = (probs.exp()/probs_old.exp())
-            # print("ratio1", ratio.mean())
             
             probs = self.gpu_model.calculate_prob_gpu(batch_states, batch_actions)
             probs_old = Variable(torch.Tensor(batch_log_probs)).to(device)#model_old.calculate_prob_gpu(batch_states, batch_actions)
@@ -625,9 +613,9 @@ class RL(object):
             loss_w = 0#torch.mean(batch_w**2)
             entropy_loss = -self.gpu_model.log_std.mean()
             if supervised:
-                total_loss = loss_expert
+                total_loss = 1.0*loss_expert
             else:
-                total_loss = loss_clip #+ mirror_loss
+                total_loss = loss_clip
                 #print(total_loss)
             #print("mirror_loss", mirror_loss)
             #print(k, loss_w)
@@ -636,10 +624,10 @@ class RL(object):
             #print(torch.nn.utils.clip_grad_norm(self.model.parameters(),1))
             optimizer.step()
         #print(self.shared_obs_stats.mean.data)
-        if self.lr > 1e-4:
+        if self.lr > 1e-5:
             self.lr *= 0.99
         else:
-            self.lr = 1e-4
+            self.lr = 1e-5
         if self.weight > 10:
             self.weight *= 0.99
         if self.weight < 10:
@@ -680,16 +668,16 @@ class RL(object):
         self.start = time.time()
         self.lr = 1e-4
         self.weight = 10
-        num_threads = 20
+        num_threads = 50
         self.num_samples = 0
         self.time_passed = 0
         score_counter = 0
         total_thread = 0
-        max_samples = 40000
+        max_samples = 25000
         seeds = [
             i * 100 for i in range(num_threads)
         ]
-        self.explore_noise = mp.Value("f", -2.0)
+        self.explore_noise = mp.Value("f", -1.5)
         #self.base_noise = np.array([2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2,  2])
         self.base_noise = np.ones(self.num_outputs)
         noise = self.base_noise * self.explore_noise.value
@@ -704,8 +692,8 @@ class RL(object):
         self.model.set_noise(noise)
         self.gpu_model.set_noise(noise)
         while score_counter < 100:
-            #if len(self.noisy_test_mean) % 100 == 1:
-                #self.save_statistics("stats/Humanoid_ppo_seed1_Iter%d.stat"%(len(self.noisy_test_mean)))
+            if len(self.noisy_test_mean) % 100 == 1:
+                self.save_statistics("stats/walker2d_contact_seed16_Iter%d.stat"%(len(self.noisy_test_mean)))
             #print(self.traffic_light.val.value)
             #if len(self.test_mean) % 100 == 1 and self.test_mean[len(self.test_mean)-1] > 300:
             #   self.save_model("torch_model/multiskill/v4_cassie3dMirrorIter%d.pt"%(len(self.test_mean),))
@@ -742,8 +730,8 @@ class RL(object):
             self.gpu_model.set_noise(self.model.noise)
             if self.base_controller is not None:
                 self.base_controller.to(device)
-            self.update_critic(min(128 * 8, len(self.memory.memory)), (len(self.memory.memory)//3000 + 1)*8)
-            self.update_actor(min(128 * 8, len(self.memory.memory)), (len(self.memory.memory)//3000 + 1)*8, supervised=False)
+            self.update_critic(min(128, len(self.memory.memory)), (len(self.memory.memory)//3000 + 1)*64)
+            self.update_actor(min(128, len(self.memory.memory)), (len(self.memory.memory)//3000 + 1)*64, supervised=False)
             #self.update_critic(128, 2560)
             #self.update_actor(128, 2560, supervised=False)
             self.gpu_model.to("cpu")
@@ -781,34 +769,31 @@ def mkdir(base, name):
     return path
 
 if __name__ == '__main__':
-    seed = 8
+    seed = 16
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)
     torch.set_num_threads(1)
     import gym
-    #env = gym.make("mocca_envs:CassiePhaseEnv-v0")
-    env = gym.make("mocca_envs:Walker3DMocapEnv-v0")
-    env.set_mirror(True)
-    ppo = RL(env, [256, 256])
-    ppo.base_dim = 55
-    #ppo.base_controller = ActorCriticNet(ppo.base_dim, ppo.num_outputs, hidden_layer=[256, 256], num_contact=2)
-    #ppo.base_controller.load_state_dict(torch.load("torch_model/WAlkerMocap_seed8_v3.pt"))
-    ppo.model_name = "torch_model/WAlkerMocap_seed8_mirror.pt"
-    #ppo.model.load_state_dict(torch.load("torch_model/WAlkerMocap_seed8_v3.pt"))
-    #ppo.env.set_difficulty([0.65, 0.65, 0, 0])
-    ppo.max_reward.value = 1#50
+    env = gym.make("Walker2d-v2")
+    env.set_contact(1)
+    ppo = RL(env, [256, 256], contact=True)
+    #ppo.base_controller = ActorCriticNet(ppo.num_inputs, ppo.num_outputs, hidden_layer=[256, 256, 256, 256, 256], num_contact=2)
+    #ppo.base_controller.load_state_dict(torch.load("torch_model/StepperOct06.pt"))
+    ppo.model_name = "torch_model/walker2d_contact_seed16.pt"
+    #ppo.model.load_state_dict(torch.load("torch_model/Stepper256X5_65_10_seed8.pt"))
+    #ppo.env.set_difficulty([0.65, 0.65, 20, 20])
+    #ppo.max_reward.value = 50
 
     #with open('torch_model/cassie3dMirror2kHz_shared_obs_stats.pkl', 'rb') as input:
     #    shared_obs_stats = pickle.load(input)
     #ppo.normalize_data()
     #ppo.save_shared_obs_stas("torch_model/cassie_terrain_obs_stats.pkl")
-    # ppo.collect_expert_samples(500, "torch_model/Stepper256X5_65_00_20_seed8.pt", noise=-2.5, difficulty = [0.65, 0.65, 0, 20])
-    # ppo.collect_expert_samples(500, "torch_model/Stepper256X5_65_00_10_seed8.pt", noise=-2.5, difficulty = [0.65, 0.65, 0, 10])
-    # ppo.collect_expert_samples(500, "torch_model/Stepper256X5_65_00_seed8.pt", noise=-2.5, difficulty = [0.65, 0.65, 0, 0])
-    # ppo.collect_expert_samples(500, "torch_model/Stepper256X5_65_10_seed8.pt", noise=-2.5, difficulty = [0.65, 0.65, 10, 10])
-    # ppo.collect_expert_samples(500, "torch_model/Stepper256X5_65_20_seed8.pt", noise=-2.5, difficulty = [0.65, 0.65, 20, 20])
+    # ppo.collect_expert_samples(500, "torch_model/Stepper256X5_65_00_seed8.pt", noise=-2.0, difficulty = [0.65, 0])
+    # ppo.collect_expert_samples(500, "torch_model/Stepper256X5_75_00_seed8.pt", noise=-2.0, difficulty = [0.75, 0])
+    # ppo.collect_expert_samples(500, "torch_model/Stepper256X5_85_00_seed8.pt", noise=-2.0, difficulty = [0.85, 0])
+    # ppo.collect_expert_samples(500, "torch_model/Stepper256X5_65_10_seed8.pt", noise=-2.0, difficulty = [0.65, 10])
     #ppo.save_model(ppo.model_name)
 
     ppo.collect_samples_multithread()
